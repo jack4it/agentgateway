@@ -2495,6 +2495,24 @@ fn backend_policy_from_proto(
 ) -> Result<BackendTrafficPolicy, ProtoError> {
 	use crate::types::proto::agent::backend_policy_spec as bps;
 	Ok(match &spec.kind {
+		Some(bps::Kind::Activation(activation)) => BackendTrafficPolicy::Activation(Arc::new(
+			crate::proxy::activation::Policy::new(
+				activation.identity.clone(),
+				activation
+					.max_wait
+					.map(convert_duration)
+					.unwrap_or_default(),
+				activation.max_pending_requests,
+			)
+			.and_then(|policy| {
+				policy.with_binding(
+					activation.binding_uid.clone(),
+					activation.epoch,
+					activation.draining,
+				)
+			})
+			.map_err(|error| ProtoError::Generic(error.to_string()))?,
+		)),
 		Some(bps::Kind::A2a(_)) => BackendTrafficPolicy::A2a(A2aPolicy {}),
 		Some(bps::Kind::InferenceRouting(ir)) => {
 			let failure_mode = match bps::inference_routing::FailureMode::try_from(ir.failure_mode)? {

@@ -131,6 +131,7 @@ pub async fn run_with_ui_assets(
 	)
 	.await?;
 	let stores = state_mgr.stores();
+	proxy::activation::register_metrics(&mut registry, stores.clone());
 	let resource_manager = state_mgr.resource_manager();
 
 	state_manager::start_self_workload_resolution(&config, stores.clone(), &ready);
@@ -205,6 +206,13 @@ pub async fn run_with_ui_assets(
 	.context("stats server starts")?;
 	// Run the metrics sever in the current tokio worker pool.
 	metrics_server.spawn();
+	if let Some(processor) = proxy::activation_push::GrpcDemandProcessor::from_env()? {
+		proxy::backend_activity::spawn(
+			processor,
+			proxy::activation::GatewayActivitySource::new(stores.clone()),
+			drain_rx.clone(),
+		);
+	}
 	Ok(Bound {
 		drain_tx,
 		shutdown,

@@ -11,6 +11,7 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/structpb"
 	"istio.io/istio/pkg/config"
+	"istio.io/istio/pkg/kube/krt"
 	"istio.io/istio/pkg/maps"
 	"istio.io/istio/pkg/ptr"
 	"istio.io/istio/pkg/slices"
@@ -159,6 +160,10 @@ func translateBackendPolicyToAgw(
 				agwPolicies = append(agwPolicies, p)
 			}
 		}
+	}
+
+	if backend.Activation != nil {
+		appendPolicy("activation")(translateBackendActivation(ctx, policy))
 	}
 
 	if s := backend.HTTP; s != nil {
@@ -632,6 +637,70 @@ func translateBackendHTTP(policy *agentgateway.AgentgatewayPolicy) *api.Policy {
 		"agentgateway_policy", tp.Name)
 
 	return tp
+}
+
+func translateBackendActivation(ctx PolicyCtx, policy *agentgateway.AgentgatewayPolicy) (*api.Policy, error) {
+	activation := policy.Spec.Backend.Activation
+	if len(policy.Spec.TargetRefs) != 1 || len(policy.Spec.TargetSelectors) != 0 {
+		return nil, fmt.Errorf("activation requires exactly one explicit Service port target")
+	}
+	target := policy.Spec.TargetRefs[0]
+	if target.Group != "" || target.Kind != "Service" || target.SectionName == nil {
+		return nil, fmt.Errorf("activation requires a Service target with numeric sectionName")
+	}
+	if activation.MaxWait.Duration <= 0 || activation.MaxPendingRequests < 1 || activation.MaxPendingRequests > 128 || activation.Epoch < 0 {
+		return nil, fmt.Errorf("invalid activation wait, request limit, or epoch")
+	}
+	service := ptr.Flatten(krt.FetchOne(ctx.Krt, ctx.Collections.Services, krt.FilterKey(policy.Namespace+"/"+string(target.Name))))
+	identity := ""
+	if activation.ServiceUID != "" {
+		if strings.Contains(activation.ServiceUID, "/") {
+			return nil, fmt.Errorf("invalid pinned activation Service UID")
+		}
+		identity = fmt.Sprintf("%s/%s/%s", policy.Namespace, activation.ServiceUID, *target.SectionName)
+		if !activation.Draining && (service == nil || activation.ServiceUID != string(service.UID)) {
+			return nil, fmt.Errorf("managed activation Service UID changed; drain and recreate the binding")
+		}
+	}
+	if activation.BindingUID != "" && (identity == "" || activation.Epoch == 0) {
+		return nil, fmt.Errorf("managed activation requires a pinned Service UID and positive epoch")
+	}
+	if activation.Draining && identity != "" {
+		// Missing-Service target resolution may still block emission. Only the
+		// adapter's complete epoch acknowledgement can authorize drain cleanup.
+		return activationPolicy(policy, identity, activation), nil
+	}
+	if service == nil {
+		return nil, fmt.Errorf("activation Service %s/%s does not exist", policy.Namespace, target.Name)
+	}
+	found := false
+	for _, port := range service.Spec.Ports {
+		if fmt.Sprint(port.Port) == string(*target.SectionName) {
+			found = true
+		}
+	}
+	if !found || service.UID == "" {
+		return nil, fmt.Errorf("invalid activation Service port or UID")
+	}
+	identity = fmt.Sprintf("%s/%s/%s", policy.Namespace, service.UID, *target.SectionName)
+	return activationPolicy(policy, identity, activation), nil
+}
+
+func activationPolicy(policy *agentgateway.AgentgatewayPolicy, identity string, activation *agentgateway.BackendActivation) *api.Policy {
+	return &api.Policy{
+		Key:  policy.Namespace + "/" + policy.Name + ":activation",
+		Name: TypedResourceName(wellknown.AgentgatewayPolicyGVK.Kind, policy),
+		Kind: &api.Policy_Backend{Backend: &api.BackendPolicySpec{
+			Kind: &api.BackendPolicySpec_Activation{Activation: &api.BackendPolicySpec_ActivationPolicy{
+				Identity:           identity,
+				MaxWait:            durationpb.New(activation.MaxWait.Duration),
+				MaxPendingRequests: uint32(activation.MaxPendingRequests),
+				BindingUid:         activation.BindingUID,
+				Epoch:              uint64(activation.Epoch),
+				Draining:           activation.Draining,
+			}},
+		}},
+	}
 }
 
 func translateBackendTunnel(ctx PolicyCtx, policy *agentgateway.AgentgatewayPolicy) (*api.Policy, error) {

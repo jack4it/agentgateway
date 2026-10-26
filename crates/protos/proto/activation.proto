@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package agentgateway.dev.activation.v1;
+
+option go_package = "agw-keda-poc/adapter/activationv1";
+
+service DemandPublisher {
+  rpc Publish(stream DemandSnapshot) returns (stream DemandAck);
+}
+
+message DemandSnapshot {
+  uint32 protocol_version = 1;
+  string pod_uid = 2;
+  string process_generation = 3;
+  uint64 sequence = 4;
+  int64 sampled_at_unix_millis = 5;
+  repeated BackendDemand backends = 6;
+  string session_id = 7;
+}
+
+message BackendDemand {
+  string identity = 1;
+  int64 outstanding = 2;
+  string binding_uid = 3;
+  uint64 epoch = 4;
+  bool draining = 5;
+}
+
+message DemandAck {
+  string session_id = 1;
+  uint64 sequence = 2;
+}

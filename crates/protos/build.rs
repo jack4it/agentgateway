@@ -12,6 +12,7 @@ fn main() -> Result<(), anyhow::Error> {
 		"proto/credprovider.proto",
 		"proto/workload.proto",
 		"proto/resource.proto",
+		"proto/activation.proto",
 		// SPIFFE Workload API. The generated bindings are gated behind the `spiffe-test-server`
 		// feature in lib.rs (see the `spiffe_workload_api` module) so they are only compiled into
 		// the crate for tests; generating the descriptor here unconditionally is harmless and keeps

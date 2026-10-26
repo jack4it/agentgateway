@@ -5,11 +5,15 @@ import (
 	"fmt"
 	"sync/atomic"
 
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 	securityclient "istio.io/client-go/pkg/apis/security/v1"
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/pkg/serviceregistry/ambient"
+	"istio.io/istio/pilot/pkg/util/protoconv"
 	"istio.io/istio/pkg/cluster"
 	"istio.io/istio/pkg/config/mesh"
+	"istio.io/istio/pkg/config/schema/kind"
 	"istio.io/istio/pkg/kube/krt"
 	"istio.io/istio/pkg/maps"
 	"istio.io/istio/pkg/ptr"
@@ -890,8 +894,24 @@ func defaultBuildAddressCollections(cols *plugins.AgwCollections, krtopts krtuti
 	workloadAddresses := krt.MapCollection(workloads, func(t *model.WorkloadInfo) Address {
 		return Address{Workload: t}
 	}, krtopts.ToOptions("addresses/WorkloadAddresses")...)
-	svcAddresses := krt.MapCollection(services, func(t *model.ServiceInfo) Address {
-		return Address{Service: t}
+	svcAddresses := krt.NewCollection(services, func(ctx krt.HandlerContext, t *model.ServiceInfo) *Address {
+		if t.Source.Kind == kind.Service {
+			service := ptr.Flatten(krt.FetchOne(ctx, cols.Services, krt.FilterKey(t.Source.NamespacedName.String())))
+			if service == nil {
+				return nil
+			}
+			if service.UID == "" {
+				return &Address{Service: t}
+			}
+			cloned := *t
+			cloned.Service = proto.Clone(t.Service).(*workloadapi.Service)
+			cloned.Service.Extensions = append(cloned.Service.Extensions, &workloadapi.Extension{
+				Name:   "agentgateway.dev/kubernetes-service-uid",
+				Config: protoconv.MessageToAny(wrapperspb.String(string(service.UID))),
+			})
+			t = precomputeServicePtr(&cloned)
+		}
+		return &Address{Service: t}
 	}, krtopts.ToOptions("addresses/ServiceAddresses")...)
 
 	adpAddresses := krt.JoinCollection([]krt.Collection[Address]{svcAddresses, workloadAddresses}, krtopts.ToOptions("addresses/All")...)

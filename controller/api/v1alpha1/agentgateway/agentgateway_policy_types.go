@@ -398,6 +398,10 @@ type BackendWithAI struct {
 type BackendFull struct {
 	BackendSimple `json:",inline"`
 
+	// Opt-in HTTP request activation for a single Service port.
+	// +optional
+	Activation *BackendActivation `json:"activation,omitempty"`
+
 	// Authorization rules that clients must satisfy after this backend is selected.
 	// Unlike traffic authorization, this policy is evaluated against the request
 	// associated with the selected destination backend.
@@ -433,6 +437,29 @@ type BackendFull struct {
 	// +optional
 	// +kubebuilder:validation:XValidation:rule="[has(self.backendRef),has(self.url)].filter(x,x==true).size() == 1",message="exactly one of backendRef or url must be set"
 	ExtAuth *ExtAuth `json:"extAuth,omitempty"`
+}
+
+type BackendActivation struct {
+	// ServiceUID pins canonical identity across a Service recreation while draining.
+	// +optional
+	ServiceUID string `json:"serviceUID,omitempty"`
+	// BindingUID and Epoch fence managed activation configurations.
+	// +optional
+	BindingUID string `json:"bindingUID,omitempty"`
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	Epoch int64 `json:"epoch,omitempty"`
+	// Draining rejects new admissions while retaining executing demand.
+	// +optional
+	Draining bool `json:"draining,omitempty"`
+	// Maximum readiness and dispatch wait.
+	// +required
+	MaxWait Duration `json:"maxWait"`
+	// Maximum outstanding requests per backend per gateway process.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=128
+	// +required
+	MaxPendingRequests int32 `json:"maxPendingRequests"`
 }
 
 // +kubebuilder:validation:MinLength=1

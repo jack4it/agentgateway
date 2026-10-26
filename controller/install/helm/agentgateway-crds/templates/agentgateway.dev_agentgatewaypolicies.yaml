@@ -79,6 +79,42 @@ spec:
                   policy sets `tls`, the effective policy would be `tcp` from the
                   `Gateway`, and `tls` from the `Backend`.
                 properties:
+                  activation:
+                    description: Opt-in HTTP request activation for a single Service
+                      port.
+                    properties:
+                      bindingUID:
+                        description: BindingUID and Epoch fence managed activation
+                          configurations.
+                        type: string
+                      draining:
+                        description: Draining rejects new admissions while retaining
+                          executing demand.
+                        type: boolean
+                      epoch:
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      maxPendingRequests:
+                        description: Maximum outstanding requests per backend per
+                          gateway process.
+                        format: int32
+                        maximum: 128
+                        minimum: 1
+                        type: integer
+                      maxWait:
+                        description: Maximum readiness and dispatch wait.
+                        maxLength: 32
+                        pattern: ^([0-9]{1,5}(h|m|s|ms)){1,4}$
+                        type: string
+                      serviceUID:
+                        description: ServiceUID pins canonical identity across a Service
+                          recreation while draining.
+                        type: string
+                    required:
+                    - maxPendingRequests
+                    - maxWait
+                    type: object
                   ai:
                     description: |-
                       Settings for AI workloads. This is only applicable when
@@ -6855,10 +6891,10 @@ spec:
                       rule: '!has(self.url) || self.url.matches(''^https?://[^/?#]+$'')'
                 type: object
                 x-kubernetes-validations:
-                - message: at least one of the fields in [ai auth authorization extAuth
-                    health http mcp sessionAffinity tcp tls transformation tunnel]
-                    must be set
-                  rule: '[has(self.ai),has(self.auth),has(self.authorization),has(self.extAuth),has(self.health),has(self.http),has(self.mcp),has(self.sessionAffinity),has(self.tcp),has(self.tls),has(self.transformation),has(self.tunnel)].filter(x,x==true).size()
+                - message: at least one of the fields in [activation ai auth authorization
+                    extAuth health http mcp sessionAffinity tcp tls transformation
+                    tunnel] must be set
+                  rule: '[has(self.activation),has(self.ai),has(self.auth),has(self.authorization),has(self.extAuth),has(self.health),has(self.http),has(self.mcp),has(self.sessionAffinity),has(self.tcp),has(self.tls),has(self.transformation),has(self.tunnel)].filter(x,x==true).size()
                     >= 1'
               frontend:
                 description: |-

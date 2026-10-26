@@ -2965,6 +2965,7 @@ pub enum TrafficPolicy {
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum BackendTrafficPolicy {
+	Activation(Arc<crate::proxy::activation::Policy>),
 	Authorization(Authorization),
 	McpAuthorization(McpAuthorization),
 	McpAuthentication(McpAuthentication),

@@ -108,6 +108,7 @@ impl<'a> From<&'a RouteTarget> for RouteTargetRef<'a> {
 
 #[derive(Debug)]
 pub struct Store {
+	configuration_revision: u64,
 	ipv6_enabled: bool,
 	core_ids: Option<Vec<core_affinity::CoreId>>,
 	dynamic_ca_cert_cache: crate::DynamicCaCertCacheConfig,
@@ -266,6 +267,7 @@ impl FrontendPolices {
 #[derive(Default, Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackendPolicies {
+	pub activation: Option<Arc<crate::proxy::activation::Policy>>,
 	pub backend_tls: Option<BackendTLS>,
 	pub backend_auth: Option<BackendAuth>,
 	pub a2a: Option<A2aPolicy>,
@@ -304,6 +306,7 @@ impl BackendPolicies {
 	// Merges self and other. Other has precedence
 	pub fn merge(self, other: BackendPolicies) -> BackendPolicies {
 		Self {
+			activation: other.activation.or(self.activation),
 			backend_tls: other.backend_tls.or(self.backend_tls),
 			backend_auth: other.backend_auth.or(self.backend_auth),
 			a2a: other.a2a.or(self.a2a),
@@ -676,6 +679,7 @@ impl Store {
 		let (listener_change_tx, listener_change_rx) = watch::channel(0);
 		Self {
 			ipv6_enabled,
+			configuration_revision: 0,
 			dynamic_ca_cert_cache,
 			core_ids: match threading_mode {
 				crate::ThreadingMode::Multithreaded => None,
@@ -733,6 +737,10 @@ impl Store {
 		self.listener_change_rx.clone()
 	}
 
+	pub fn configuration_revision(&self) -> u64 {
+		self.configuration_revision
+	}
+
 	pub fn get_bind_listener(&self, bind: &BindKey, listener: &ListenerKey) -> Option<Arc<Listener>> {
 		self
 			.listeners
@@ -755,6 +763,7 @@ impl Store {
 	}
 
 	fn insert_http_route_target(&mut self, target: RouteTarget, route: Route) {
+		self.configuration_revision = self.configuration_revision.wrapping_add(1);
 		let routes = self
 			.http_routes
 			.entry(target)
@@ -1370,6 +1379,9 @@ impl Store {
 		let mut pol = BackendPolicies::default();
 		for rule in rules {
 			match &rule {
+				BackendTrafficPolicy::Activation(p) => {
+					pol.activation.get_or_insert_with(|| p.clone());
+				},
 				BackendTrafficPolicy::Authorization(p) => {
 					authz.push(p.clone().0);
 				},
@@ -1655,6 +1667,8 @@ impl Store {
         fields(bind),
     )]
 	pub fn remove_policy(&mut self, pol: PolicyKey) {
+		self.configuration_revision = self.configuration_revision.wrapping_add(1);
+		crate::proxy::activation::notify_change();
 		if let Some(old) = self.policies_by_key.remove(&pol)
 			&& let Some(o) = self.policies_by_target.get_mut(&old.target)
 		{
@@ -1695,6 +1709,7 @@ impl Store {
 	}
 
 	pub fn remove_route_group(&mut self, rg: RouteGroupKey) {
+		self.configuration_revision = self.configuration_revision.wrapping_add(1);
 		self.http_routes.remove(&Self::route_group_target_ref(&rg));
 	}
 
@@ -1736,6 +1751,7 @@ impl Store {
         fields(route),
     )]
 	pub fn remove_route(&mut self, route: RouteKey) {
+		self.configuration_revision = self.configuration_revision.wrapping_add(1);
 		self.remove_http_route(&route);
 	}
 
@@ -1797,6 +1813,10 @@ impl Store {
 	}
 
 	pub fn insert_policy(&mut self, pol: TargetedPolicy) {
+		self.configuration_revision = self.configuration_revision.wrapping_add(1);
+		if let Some(BackendTrafficPolicy::Activation(activation)) = pol.policy.as_backend() {
+			activation.activate();
+		}
 		let pol = Arc::new(pol);
 		if let Some(old) = self.policies_by_key.insert(pol.key.clone(), pol.clone()) {
 			// Remove the old target. We may add it back, though.

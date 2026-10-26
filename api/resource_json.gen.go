@@ -1645,6 +1645,17 @@ func (this *BackendPolicySpec_McpGuardrails_Processor) UnmarshalJSON(b []byte) e
 	return ResourceUnmarshaler.Unmarshal(bytes.NewReader(b), this)
 }
 
+// MarshalJSON is a custom marshaler for BackendPolicySpec_ActivationPolicy
+func (this *BackendPolicySpec_ActivationPolicy) MarshalJSON() ([]byte, error) {
+	str, err := ResourceMarshaler.MarshalToString(this)
+	return []byte(str), err
+}
+
+// UnmarshalJSON is a custom unmarshaler for BackendPolicySpec_ActivationPolicy
+func (this *BackendPolicySpec_ActivationPolicy) UnmarshalJSON(b []byte) error {
+	return ResourceUnmarshaler.Unmarshal(bytes.NewReader(b), this)
+}
+
 // MarshalJSON is a custom marshaler for StaticBackend
 func (this *StaticBackend) MarshalJSON() ([]byte, error) {
 	str, err := ResourceMarshaler.MarshalToString(this)

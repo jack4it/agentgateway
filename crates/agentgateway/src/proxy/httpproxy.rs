@@ -411,6 +411,7 @@ async fn apply_backend_policies(
 	rp: &mut ResponsePolicies,
 ) -> Result<(), ProxyResponse> {
 	let BackendPolicies {
+		activation: _,
 		backend_tls: _,
 		backend_auth,
 		a2a,
@@ -1009,6 +1010,11 @@ impl HTTPProxy {
 
 		Self::detect_misdirected(&bind, &req, &selected_listener).snapshot_on_err(log, &mut req)?;
 
+		req
+			.extensions_mut()
+			.insert(super::activation::ConfigurationRevision(
+				inputs.stores.read_binds().configuration_revision(),
+			));
 		let selected_route_chain =
 			select_route_chain(&inputs, self.target_address, &selected_listener, &req)
 				.snapshot_on_err(log, &mut req)?;
@@ -2369,8 +2375,14 @@ async fn build_simple_backend_call(
 	),
 	ProxyResponse,
 > {
-	let (maybe_inference, service_override) =
-		apply_inference_routing(&policies, policy_client, req, log, response_policies).await?;
+	let (maybe_inference, service_override) = apply_inference_routing(
+		&policies,
+		policy_client.clone(),
+		req,
+		log,
+		response_policies,
+	)
+	.await?;
 	let backend_call = match backend {
 		SimpleBackend::Service(svc, port) => {
 			// If user explicitly set auto hostname, we support it for Service.
@@ -2379,6 +2391,48 @@ async fn build_simple_backend_call(
 				&& auto.explicit
 			{
 				auto.target = Some(svc.hostname.clone());
+			}
+			if let Some(activation) = policies.activation.clone() {
+				set_backend_cel_context(req, log.as_ref(), None);
+				if req
+					.extensions()
+					.get::<super::activation::RequestDemand>()
+					.is_none()
+				{
+					let _ = policies
+						.authorization
+						.apply(
+							"backend authorization",
+							&policy_client,
+							log,
+							req,
+							response_policies.headers(),
+						)
+						.await?;
+					let _ = policies
+						.ext_authz
+						.apply(
+							"backend ext authz",
+							&policy_client,
+							log,
+							req,
+							response_policies.headers(),
+						)
+						.await?;
+				}
+				return Box::pin(build_activation_call(
+					inputs,
+					policies,
+					log,
+					service_override,
+					svc,
+					*port,
+					req,
+					hbone_source,
+					&activation,
+				))
+				.await
+				.map(|call| (call, maybe_inference));
 			}
 			build_service_call(
 				inputs,
@@ -2435,6 +2489,159 @@ async fn build_simple_backend_call(
 		},
 	};
 	Ok((backend_call, maybe_inference))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn build_activation_call(
+	inputs: &ProxyInputs,
+	policies: Arc<BackendPolicies>,
+	log: &mut Option<&mut RequestLog>,
+	service_override: ServiceCallOverride,
+	service: &Arc<Service>,
+	port: u16,
+	req: &mut Request,
+	hbone_source: Option<HboneSourceRole>,
+	activation: &super::activation::Policy,
+) -> Result<BackendCall, ProxyResponse> {
+	if req.method() != ::http::Method::GET && req.method() != ::http::Method::POST
+		|| req.headers().contains_key(::http::header::UPGRADE)
+		|| http::is_grpc_content_type(req.headers())
+	{
+		return Err(ProxyError::InvalidRequest.into());
+	}
+	let length = req
+		.headers()
+		.get(::http::header::CONTENT_LENGTH)
+		.map(|value| {
+			value
+				.to_str()
+				.ok()
+				.and_then(|value| value.parse::<u64>().ok())
+		});
+	if matches!(length, Some(None) | Some(Some(65537..)))
+		|| req
+			.headers()
+			.contains_key(::http::header::TRANSFER_ENCODING)
+		|| http_body::Body::size_hint(req.body())
+			.upper()
+			.is_none_or(|size| size > 65536)
+	{
+		return Err(ProxyError::InvalidRequest.into());
+	}
+	let previous = req
+		.extensions()
+		.get::<super::activation::RequestDemand>()
+		.cloned();
+	let demand = match &previous {
+		Some(previous) if previous.identity == activation.identity => previous.demand.clone(),
+		Some(_) => return Err(ProxyError::InvalidBackendType.into()),
+		None => activation.admit().ok_or_else(|| {
+			let reason = if activation.is_draining() {
+				"activation binding is draining"
+			} else {
+				"activation capacity exhausted"
+			};
+			let response = ::http::Response::builder()
+				.status(StatusCode::SERVICE_UNAVAILABLE)
+				.header("retry-after", "1")
+				.body(http::Body::from(reason))
+				.expect("static activation response");
+			ProxyResponse::DirectResponse(Box::new(response))
+		})?,
+	};
+	if previous.is_none() {
+		debug!(
+			target: "activation",
+			request_id = req.headers().get("x-request-id").and_then(|value| value.to_str().ok()).unwrap_or(""),
+			identity = %activation.identity,
+			phase = "admitted",
+			"activation demand admitted"
+		);
+	}
+	let mut changes = inputs.stores.discovery.subscribe();
+	let revision = req
+		.extensions()
+		.get::<super::activation::ConfigurationRevision>()
+		.ok_or(ProxyError::BackendDoesNotExist)?
+		.0;
+	let resolve = || -> Result<Arc<Service>, ProxyResponse> {
+		if inputs.stores.read_binds().configuration_revision() != revision
+			|| !super::activation::configured(&inputs.stores, &activation.identity)
+		{
+			return Err(ProxyError::BackendDoesNotExist.into());
+		}
+		let current = inputs
+			.stores
+			.read_discovery()
+			.services
+			.get_by_namespaced_host(&service.namespaced_hostname())
+			.ok_or(ProxyError::ServiceNotFound)?;
+		if !activation.matches_service(&current, port) {
+			return Err(ProxyError::BackendDoesNotExist.into());
+		}
+		Ok(current)
+	};
+	let wait = async {
+		let dispatch = match previous {
+			Some(previous) => previous.dispatch,
+			None => {
+				let permit = activation.dispatch();
+				tokio::pin!(permit);
+				loop {
+					resolve()?;
+					tokio::select! {
+						permit = &mut permit => break Arc::new(permit),
+						_ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
+					}
+				}
+			},
+		};
+		loop {
+			let current = resolve()?;
+			let call = build_service_call(
+				inputs,
+				policies.clone(),
+				log,
+				service_override.clone(),
+				&current,
+				&port,
+				req.uri().host(),
+				hbone_source,
+			);
+			match call {
+				Ok(call) => {
+					debug!(
+						target: "activation",
+						request_id = req.headers().get("x-request-id").and_then(|value| value.to_str().ok()).unwrap_or(""),
+						identity = %activation.identity,
+						phase = "discovery_ready",
+						"activation backend resolved"
+					);
+					req
+						.extensions_mut()
+						.insert(super::activation::RequestDemand {
+							identity: activation.identity.clone(),
+							demand,
+							dispatch,
+						});
+					return Ok(call);
+				},
+				Err(ProxyError::NoHealthyEndpoints) => {},
+				Err(error) => return Err(error.into()),
+			}
+			tokio::select! {
+				result = changes.changed() => {
+					if result.is_err() {
+						return Err(ProxyError::BackendDoesNotExist.into());
+					}
+				},
+				_ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
+			}
+		}
+	};
+	tokio::time::timeout(activation.max_wait, wait)
+		.await
+		.map_err(|_| ProxyResponse::Error(ProxyError::RequestTimeout))?
 }
 
 // Explicit policy routes retain their suffix semantics and override native model classification.
@@ -2959,6 +3166,10 @@ async fn make_backend_call(
 		backend_call.static_target.then_some(&backend_call.target),
 	);
 
+	let activation_guard = req
+		.extensions()
+		.get::<super::activation::RequestDemand>()
+		.cloned();
 	let (mut req, llm_response_policies, llm_request) =
 		if let Some(llm) = &backend_call.backend_policies.llm_provider {
 			// LLM requires CEL execution after the snapshot so we do not clear extensions
@@ -3367,7 +3578,7 @@ async fn make_backend_call(
 	}
 	let response_body_limit = crate::http::response_buffer_limit(&resp);
 	let resp = resp.map(|b| dtrace::TracingBody::maybe_wrap("response", b, response_body_limit));
-	Ok(resp)
+	Ok(resp.map(|body| body.with_drop_guard(activation_guard)))
 }
 
 /// Resolves a Substrate actor assignment into an in-process dynamic backend result.
@@ -4299,6 +4510,7 @@ mod tests {
 
 	fn multi_port_inference_service() -> Service {
 		Service {
+			kubernetes_uid: None,
 			name: "gateway-pool".into(),
 			namespace: "default".into(),
 			hostname: "gateway-pool.default.inference.cluster.local".into(),

@@ -625,12 +625,19 @@ pub struct Dump {
 #[derive(Clone, Debug)]
 pub struct StoreUpdater {
 	state: Arc<RwLock<Store>>,
+	changes: Sender<()>,
 }
 
 impl StoreUpdater {
 	/// Creates a new updater for the given stores.
 	pub fn new(state: Arc<RwLock<Store>>) -> Self {
-		Self { state }
+		Self {
+			state,
+			changes: Sender::new(()),
+		}
+	}
+	pub fn subscribe(&self) -> tokio::sync::watch::Receiver<()> {
+		self.changes.subscribe()
 	}
 	pub fn read(&self) -> std::sync::RwLockReadGuard<'_, Store> {
 		self.state.read().expect("mutex acquired")
@@ -722,6 +729,7 @@ impl StoreUpdater {
 				s.services.remove_endpoint(&prev);
 			}
 		}
+		self.changes.send_replace(());
 		Ok(next_state)
 	}
 }
@@ -749,7 +757,9 @@ impl agent_xds::Handler<XdsAddress> for StoreUpdater {
 			}
 			Ok(())
 		};
-		agent_xds::handle_single_resource(updates, handle)
+		let result = agent_xds::handle_single_resource(updates, handle);
+		self.changes.send_replace(());
+		result
 	}
 }
 

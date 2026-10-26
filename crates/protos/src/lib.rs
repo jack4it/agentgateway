@@ -80,6 +80,11 @@ pub mod workload {
 	pub use crate::istio::workload::*;
 }
 
+#[allow(warnings)]
+pub mod activation {
+	tonic::include_proto!("agentgateway.dev.activation.v1");
+}
+
 // SPIFFE Workload API bindings (gRPC client + server), generated from proto/spiffe_workload.proto.
 //
 // TEST/E2E ONLY: gated behind the `spiffe-test-server` feature, which is enabled via agentgateway's

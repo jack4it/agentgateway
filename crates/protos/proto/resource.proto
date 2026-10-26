@@ -1826,6 +1826,15 @@ message BackendPolicySpec {
     reserved "remote", "methods";
   }
 
+  message ActivationPolicy {
+    string identity = 1;
+    google.protobuf.Duration max_wait = 2;
+    uint32 max_pending_requests = 3;
+    string binding_uid = 4;
+    uint64 epoch = 5;
+    bool draining = 6;
+  }
+
   oneof kind {
     A2a a2a = 1;
     InferenceRouting inference_routing = 2;
@@ -1851,6 +1860,7 @@ message BackendPolicySpec {
     TrafficPolicySpec.RBAC authorization = 19;
     SessionAffinity session_affinity = 20;
     UrlRewrite url_rewrite = 21;
+    ActivationPolicy activation = 22;
   }
 }
 

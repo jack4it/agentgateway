@@ -8,6 +8,7 @@ use std::str::FromStr;
 
 use anyhow::anyhow;
 use prometheus_client::encoding::{EncodeLabelValue, LabelValueEncoder};
+use prost::Message;
 use serde::de::Visitor;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -540,6 +541,8 @@ pub enum InboundProtocol {
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Service {
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub kubernetes_uid: Option<Strng>,
 	pub name: Strng,
 	pub namespace: Strng,
 	pub hostname: Strng,
@@ -991,6 +994,30 @@ impl TryFrom<&XdsService> for Service {
 			.collect::<Result<HashMap<_, _>, ProtoError>>()?;
 		let ip_families = ip_family_from_xds(workload::IpFamilies::try_from(s.ip_families)?);
 		let svc = Service {
+			kubernetes_uid: {
+				let mut uid = None;
+				for extension in &s.extensions {
+					if extension.name != "agentgateway.dev/kubernetes-service-uid" {
+						continue;
+					}
+					if uid.is_some() {
+						return Err(ProtoError::Generic(
+							"duplicate Kubernetes Service UID".into(),
+						));
+					}
+					let config = extension
+						.config
+						.as_ref()
+						.ok_or(ProtoError::MissingRequiredField)?;
+					if config.type_url != "type.googleapis.com/google.protobuf.StringValue" {
+						return Err(ProtoError::Generic(
+							"invalid Kubernetes Service UID type".into(),
+						));
+					}
+					uid = Some(strng::new(String::decode(config.value.as_slice())?));
+				}
+				uid
+			},
 			name: Strng::from(&s.name),
 			namespace: Strng::from(&s.namespace),
 			hostname: Strng::from(&s.hostname),
